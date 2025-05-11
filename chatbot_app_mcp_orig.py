@@ -4,9 +4,6 @@ import json
 import time
 import os
 
-from LLMCPClient.HTTPClient import MCPClient  
-import asyncio
-
 # Set page configuration
 st.set_page_config(
     page_title="Claude-Powered Chat Assistant",
@@ -142,7 +139,7 @@ def get_claude_direct(messages):
             st.error(f"Response error: {response.text}")
         return "I'm having trouble connecting to my AI backend. Please check the API key in your secrets file and try again."
 
-def get_claude_via_mcp(messages) -> str:
+def get_claude_via_mcp(messages):
     # Get selected MCP server configuration
     if not st.session_state.mcp_servers or st.session_state.selected_mcp_server_index >= len(st.session_state.mcp_servers):
         st.error("MCP server configuration is missing or invalid.")
@@ -183,27 +180,39 @@ def get_claude_via_mcp(messages) -> str:
         #"Authorization": f"Bearer {mcp_api_key}"
     }
     
-
     try:
         # Log server connection attempt (can be removed in production)
         st.session_state.last_used_server = selected_server["name"]
         
-        # Initialize MCP client
-        client = MCPClient()
-
-        asyncio.run(client.connect_to_http_server(mcp_endpoint))
-
-        # Call the tool with the user input
-        response = asyncio.run(client.chat(msg["content"]))
-        return response
+        # Make API request
+        response = requests.post(mcp_endpoint, headers=headers, json=mcp_payload)
+        response.raise_for_status()
+        response_data = response.json()
         
+        # Handle MCP-specific response format
+        if "response" in response_data and "content" in response_data["response"]:
+            return response_data["response"]["content"]
+        else:
+            return response_data.get("message", "Received an unexpected response format from MCP")
+    except requests.exceptions.ConnectionError:
+        st.error(f"Connection error: Could not connect to MCP server '{selected_server['name']}'. Please check the endpoint URL.")
+        return f"I'm having trouble connecting to the MCP server '{selected_server['name']}'. Please check your endpoint URL and network connection."
+    except requests.exceptions.Timeout:
+        st.error(f"Timeout error: The request to MCP server '{selected_server['name']}' timed out.")
+        return f"The request to MCP server '{selected_server['name']}' timed out. The server might be overloaded or experiencing issues."
+    except requests.exceptions.HTTPError as http_err:
+        status_code = http_err.response.status_code if hasattr(http_err, 'response') and hasattr(http_err.response, 'status_code') else "unknown"
+        st.error(f"HTTP error: {status_code} when calling MCP server '{selected_server['name']}'.")
+        
+        if status_code == 401 or status_code == 403:
+            return f"Authentication error when calling MCP server '{selected_server['name']}'. Please check your API key."
+        else:
+            return f"HTTP error {status_code} when calling MCP server '{selected_server['name']}'. Please check your configuration."
     except Exception as e:
         st.error(f"Error calling MCP API on server '{selected_server['name']}': {str(e)}")
+        if 'response' in locals() and hasattr(response, 'text'):
+            st.error(f"Response error: {response.text}")
         return f"I'm having trouble connecting to the MCP server '{selected_server['name']}'. Please check your MCP configuration and try again."
-
-    finally:
-        # Cleanup MCP client
-        asyncio.run(client.cleanup())
 
 # Initialize tracking for last used server info
 if "last_used_server" not in st.session_state:
@@ -424,15 +433,10 @@ if prompt := st.chat_input("Type your message here..."):
     with st.chat_message("user", avatar="🧑‍💻"):
         st.write(prompt)
     
-
     # Display a spinner while waiting for Claude's response
     with st.spinner(f"Thinking... (via {run_mode_options[st.session_state.run_mode]})"):
         # Get response from Claude API
-        try:
-            claude_response = asyncio.run(get_claude_response(st.session_state.messages, st.session_state.run_mode))
-        except Exception as e:
-            st.error(f"Error: {str(e)}")
-            claude_response = "I'm having trouble connecting to my AI backend. Please check the API key in your secrets file and try again."
+        claude_response = get_claude_response(st.session_state.messages, st.session_state.run_mode)
     
     # Display Claude's response with typing animation
     with st.chat_message("assistant", avatar="🤖"):
@@ -441,12 +445,12 @@ if prompt := st.chat_input("Type your message here..."):
         # Simulate typing with a gentle approach
         full_response = ""
         # Split the response into words for smoother animation
-        #words = claude_response.split()
-        #for i in range(0, len(words), 3):  # Process 3 words at a time for efficiency
-        #    chunk = " ".join(words[i:i+3])
-        #    full_response += chunk + " "
-        #    message_placeholder.write(full_response + "▌")
-        #    time.sleep(0.05)
+        words = claude_response.split()
+        for i in range(0, len(words), 3):  # Process 3 words at a time for efficiency
+            chunk = " ".join(words[i:i+3])
+            full_response += chunk + " "
+            message_placeholder.write(full_response + "▌")
+            time.sleep(0.05)
             
         # Write the final response
         message_placeholder.write(claude_response)
